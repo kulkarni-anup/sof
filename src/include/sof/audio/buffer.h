@@ -32,8 +32,6 @@
 
 struct comp_dev;
 
-#define __must_check __attribute__((warn_unused_result))
-
 /** \name Trace macros
  *  @{
  */
@@ -85,24 +83,12 @@ extern struct tr_ctx buffer_tr;
 #define BUFF_PARAMS_RATE	BIT(2)
 #define BUFF_PARAMS_CHANNELS	BIT(3)
 
-struct comp_buffer;
-
-/*
- * audio component buffer - connects 2 audio components together in pipeline.
- *
- * The buffer is a hot structure that must be shared on certain cache
- * incoherent architectures.
- *
- * Access flow
- * 1) Lock acquired from using uncache ptr.
- * 2) Invalidate after lock acquired.
- * 3) safe to use cached pointer for access.
- * 4) Writeback cached data
- * 5) release lock using uncache pointer.
- *  */
+/* audio component buffer - connects 2 audio components together in pipeline */
 struct comp_buffer {
+	spinlock_t *lock;		/* locking mechanism */
 
-	spinlock_t lock;		/* locking mechanism */
+	/* data buffer */
+	struct audio_stream stream;
 
 	/* configuration */
 	uint32_t id;
@@ -111,9 +97,6 @@ struct comp_buffer {
 	uint32_t core;
 	bool inter_core; /* true if connected to a comp from another core */
 	struct tr_ctx tctx;			/* trace settings */
-
-	/* data buffer */
-	struct audio_stream stream;
 
 	/* connected components */
 	struct comp_dev *source;	/* source component */
@@ -129,7 +112,7 @@ struct comp_buffer {
 
 	bool hw_params_configured; /**< indicates whether hw params were set */
 	bool walking;	/**< indicates if the buffer is being walking */
-}__attribute__((aligned(PLATFORM_DCACHE_ALIGN)));
+};
 
 struct buffer_cb_transact {
 	struct comp_buffer *buffer;
@@ -211,28 +194,21 @@ static inline void buffer_writeback(struct comp_buffer *buffer, uint32_t bytes)
  * @param buffer Buffer instance.
  * @param flags IRQ flags.
  */
-__must_check static inline struct comp_buffer *buffer_lock(struct comp_buffer *buffer, uint32_t *flags)
+static inline void buffer_lock(struct comp_buffer *buffer, uint32_t *flags)
 {
-	// TODO assert is someone passes a cached address in here.
-	// assert(is_cached(buffer));
-
 	if (!buffer->inter_core) {
 		/* Ignored by buffer_unlock() below, silences "may be
 		 * used uninitialized" warning.
 		 */
 		*flags = 0xffffffff;
-		goto out;
+		return;
 	}
 
 	/* Expands to: *flags = ... */
-	spin_lock_irq(&buffer->lock, *flags);
+	spin_lock_irq(buffer->lock, *flags);
 
 	/* invalidate in case something has changed during our wait */
-	dcache_invalidate_region(uncache_to_cache(buffer), sizeof(*buffer));
-
-out:
-	/* client can now use cached buffer */
-	return uncache_to_cache(buffer);
+	dcache_invalidate_region(buffer, sizeof(*buffer));
 }
 
 /**
@@ -243,20 +219,18 @@ out:
  * @param buffer Buffer instance.
  * @param flags IRQ flags.
  */
-__must_check static inline struct comp_buffer *buffer_unlock(struct comp_buffer *buffer, uint32_t flags)
+static inline void buffer_unlock(struct comp_buffer *buffer, uint32_t flags)
 {
-	// TODO assert is someone passes a uncached address in here.
-	// assert(is_cached(buffer));
-
 	if (!buffer->inter_core)
-		return cache_to_uncache(buffer);
+		return;
+
+	/* save lock pointer to avoid memory access after cache flushing */
+	spinlock_t *lock = buffer->lock;
 
 	/* wtb and inv to avoid buffer locking in read only situations */
 	dcache_writeback_invalidate_region(buffer, sizeof(*buffer));
 
-	/* unlock and return uncache alias */
-	spin_unlock_irq(&(cache_to_uncache(buffer))->lock, flags);
-	return cache_to_uncache(buffer);
+	spin_unlock_irq(lock, flags);
 }
 
 static inline void buffer_reset_pos(struct comp_buffer *buffer, void *data)
