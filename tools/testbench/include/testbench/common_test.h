@@ -48,6 +48,7 @@ struct testbench_prm {
 	enum sof_ipc_frame frame_fmt;
 	int copy_iterations;
 	bool copy_check;
+	int dynamic_pipeline_iterations;
 };
 
 struct shared_lib_table {

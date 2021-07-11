@@ -13,6 +13,14 @@
 #include <inttypes.h>
 #include <stddef.h>
 
+#include <stdlib.h>
+#include <string.h>
+#include <malloc.h>
+#include <stdio.h>
+#include <execinfo.h>
+#include <sof/debug/panic.h>
+#include <sof/lib/cache.h>
+
 struct sof;
 
 #define PLATFORM_DCACHE_ALIGN	sizeof(void *)
@@ -33,21 +41,178 @@ uint8_t *get_library_mailbox(void);
 
 #define SHARED_DATA
 
-static inline void *platform_shared_get(void *ptr, int bytes)
+/*
+ * Use uncache address from caller and return cache[core] address. This can
+ * result in.
+ *
+ * 1) Creating a new cache mapping for a heap object.
+ * 2) Creating a new cache and unache mapping for a DATA section object.
+ */
+static inline void *_uncache_to_cache(void *address, const char *func, int line,
+		size_t size)
 {
-	return ptr;
+	struct cache_elem *elem;
+	int core = _cache_find_core(func, line);
+	int i;
+	void *cache_addr;
+	void *backtrace_data[1024];
+	int backtrace_size;
+	size_t heap;
+
+	fprintf(stdout, "\n\n");
+
+	/* find elem with uncache address */
+	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
+		elem = &host_cache->elem[i];
+		if (elem->uncache == address) {
+			fprintf(stdout, "uncache -> cache: %s() line %d\n", func, line);
+			cache_addr = elem->cache[core].data;
+			goto found_uncache;
+		}
+	}
+
+	/* uncache area not found so this must be DATA section*/
+	fprintf(stdout, "uncache -> cache: %s() line %d\n new DATA object\n", func, line);
+
+	backtrace_size = backtrace(backtrace_data, 1024);
+	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
+
+	/* try and get ptr type */
+	heap = malloc_usable_size(address);
+	if (!heap)
+		fprintf(stdout, " object is DATA %zu\n", size);
+	else
+		fprintf(stdout, " object is HEAP %zu\n", size);
+
+	/* find a new elem for this new mapping */
+	elem = _cache_new_elem();
+	if (!elem)
+		return NULL;
+
+	/* set a new uncache mapping */
+	_cache_set_udata(elem, core, func, line, CACHE_DATA_TYPE_DATA_UNCACHE, address, size);
+
+	/* get a cache address for the new uncache mapping */
+	cache_addr = _cache_new_cdata(elem, core, func, line, CACHE_DATA_TYPE_DATA_CACHE, size);
+	if (!cache_addr)
+		return cache_addr;
+
+found_uncache:
+	return cache_addr;
 }
+
+#define uncache_to_cache(address)	\
+	_uncache_to_cache(address, __func__, __LINE__, sizeof(*address))
+
+/*
+ * Use uncache address from caller and return cache[core] address. This can
+ * result in.
+ *
+ * 1) Creating a new cache mapping for a heap object.
+ * 2) Creating a new cache and unache mapping for a DATA section object.
+ */
+static inline void *_cache_to_uncache(void *address, const char *func, int line,
+		size_t size)
+{
+	struct cache_elem *elem;
+	int core = _cache_find_core(func, line);
+	int i;
+	void *uncache_addr;
+	void *backtrace_data[1024];
+	int backtrace_size;
+	size_t heap;
+
+	fprintf(stdout, "\n\n");
+
+	/* find elem with uncache address */
+	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
+		elem = &host_cache->elem[i];
+		if (elem->cache[core].data == address) {
+			uncache_addr = elem->uncache;
+			fprintf(stdout, "cache -> uncache: %s() line %d\n", func, line);
+			if (!uncache_addr)
+				goto new_uncache;
+			goto found_uncache;
+		}
+	}
+
+	/* uncache area not found so this must be DATA section*/
+	fprintf(stdout, "cache -> uncache: %s() line %d\n new object size %zu\n", func, line, size);
+
+	backtrace_size = backtrace(backtrace_data, 1024);
+	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
+
+	/* try and get ptr type */
+	heap = malloc_usable_size(address);
+	if (!heap)
+		fprintf(stdout, " object is DATA %zu\n", size);
+	else
+		fprintf(stdout, " object is HEAP %zu\n", size);
+
+
+	/* find a new elem for this new mapping */
+	elem = _cache_new_elem();
+	if (!elem)
+		return NULL;
+
+	/* set a new uncache mapping */
+	_cache_set_cdata(elem, core, func, line, CACHE_DATA_TYPE_DATA_UNCACHE, address, size);
+
+new_uncache:
+	/* get a cache address for the new uncache mapping */
+	uncache_addr = _cache_new_udata(elem, core, func, line, CACHE_DATA_TYPE_DATA_CACHE, size);
+	if (!uncache_addr)
+		return uncache_addr;
+
+found_uncache:
+	return uncache_addr;
+}
+#define cache_to_uncache(address) \
+	_cache_to_uncache(address, __func__, __LINE__, sizeof(*address))
+
+static inline int _is_uncache(void *address, const char *func, int line,
+		size_t size)
+{
+	struct cache_elem *elem;
+	int i;
+
+	fprintf(stdout, "\n\n");
+
+	/* find elem with uncache address */
+	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
+		elem = &host_cache->elem[i];
+		if (elem->uncache == address) {
+			fprintf(stdout, "is uncache found: %s() line %d\n", func, line);
+			return 1;
+		}
+	}
+
+	fprintf(stdout, "is uncache not found: %s() line %d\n", func, line);
+	return 0;
+}
+
+/* check for memory type - not foolproof here */
+#define is_uncached(address)	\
+	_is_uncache(address, __func__, __LINE__, sizeof(*address))
+
+#define platform_shared_get(ptr, bytes) 			\
+	({dcache_invalidate_region(ptr, bytes);			\
+	_cache_to_uncache(ptr, __func__, __LINE__, sizeof(*ptr));}) 		\
+
 
 void platform_init_memmap(struct sof *sof);
 
-static inline void *platform_rfree_prepare(void *ptr)
-{
-	return ptr;
-}
+#define platform_rfree_prepare(ptr) \
+	({fprintf(stdout, "prepare free %s() line %d size\n", __func__, __LINE__, sizeof(*ptr)); \
+	ptr;})
 
-#define uncache_to_cache(address)	address
-#define cache_to_uncache(address)	address
-#define is_uncached(address)		1
+
+
+// wb will copy cache[core] bytes to uncache in 64byte chunks
+
+// wb inv copy cache[core] bytes to uncache in 64 byte chunks and also to other cache
+
+// alloc will alloc uncache and cache
 
 #define ARCH_OOPS_SIZE	0
 

@@ -717,11 +717,13 @@ int parse_topology(struct sof *sof,
 	/* file size */
 	if (fseek(file, 0, SEEK_END)) {
 		fprintf(stderr, "error: seek to end of topology\n");
+		fclose(file);
 		return -errno;
 	}
 	file_size = ftell(file);
 	if (fseek(file, 0, SEEK_SET)) {
 		fprintf(stderr, "error: seek to beginning of topology\n");
+		fclose(file);
 		return -errno;
 	}
 
@@ -730,6 +732,7 @@ int parse_topology(struct sof *sof,
 	hdr = (struct snd_soc_tplg_hdr *)malloc(size);
 	if (!hdr) {
 		fprintf(stderr, "error: mem alloc\n");
+		fclose(file);
 		return -errno;
 	}
 
@@ -738,7 +741,7 @@ int parse_topology(struct sof *sof,
 		/* read topology header */
 		ret = fread(hdr, sizeof(struct snd_soc_tplg_hdr), 1, file);
 		if (ret != 1)
-			return -EINVAL;
+			goto out;
 
 		sprintf(message, "type: %x, size: 0x%x count: %d index: %d\n",
 			hdr->type, hdr->payload_size, hdr->count, hdr->index);
@@ -764,11 +767,9 @@ int parse_topology(struct sof *sof,
 					 realloc(temp_comp_list, size);
 
 			if (!comp_list_realloc && size) {
-				free(temp_comp_list);
-				free(hdr);
-				fclose(file);
 				fprintf(stderr, "error: mem realloc\n");
-				return -errno;
+				ret = -errno;
+				goto out;
 			}
 			temp_comp_list = comp_list_realloc;
 
@@ -793,7 +794,8 @@ int parse_topology(struct sof *sof,
 			if (load_graph(sof, temp_comp_list, hdr->count,
 				       num_comps, hdr->index) < 0) {
 				fprintf(stderr, "error: pipeline graph\n");
-				return -EINVAL;
+				ret = -EINVAL;
+				goto out;
 			}
 			if (ftell(file) == file_size)
 				goto finish;
@@ -802,7 +804,8 @@ int parse_topology(struct sof *sof,
 		default:
 			if (fseek(file, hdr->payload_size, SEEK_CUR)) {
 				fprintf(stderr, "error: fseek payload size\n");
-				return -errno;
+				ret = -errno;
+				goto out;
 			}
 
 			if (ftell(file) == file_size)
@@ -815,6 +818,7 @@ finish:
 	debug_print("topology parsing end\n");
 	strcpy(pipeline_msg, pipeline_string);
 
+out:
 	/* free all data */
 	free(hdr);
 
