@@ -69,40 +69,152 @@ struct cache_context {
 
 extern struct cache_context *host_cache;
 
-static inline struct cache_elem *_cache_new_elem(void)
+/* tunable parameters */
+#define _CACHE_LINE_SIZE	64
+#define _BACTRACE_SIZE		1024
+
+/*
+ * Dump the data object type i.e. it's either DATA or heap.
+ */
+static inline void _cache_dump_address_type(void *addr, size_t size)
+{
+	size_t heap;
+
+	/* try and get ptr type */
+	heap = malloc_usable_size(addr);
+	if (!heap)
+		fprintf(stdout, " object is DATA %zu\n", size);
+	else
+		fprintf(stdout, " object is HEAP %zu\n", size);
+}
+
+/*
+ * Dump the stack backtrace.
+ */
+static inline void _cache_dump_backtrace(void)
+{
+	void *backtrace_data[_BACTRACE_SIZE];
+	int backtrace_size;
+
+	backtrace_size = backtrace(backtrace_data, _BACTRACE_SIZE);
+	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
+}
+
+/*
+ * Calculate the size of the cache operation in bytes (i.e. aligned to the
+ * cache line size)
+ */
+static inline size_t _cache_op_size(size_t req_size)
+{
+	if (req_size % _CACHE_LINE_SIZE)
+		return req_size + _CACHE_LINE_SIZE - (req_size % _CACHE_LINE_SIZE);
+	else
+		return req_size;
+}
+
+/*
+ * Calculate the alignment offset of the cache operation in bytes (i.e. aligned
+ * to the cache line size)
+ */
+static inline long _cache_op_offset(void *base, void *addr)
+{
+	unsigned long offset;
+
+	assert(addr >= base);
+
+	offset = (unsigned long)addr - (unsigned long)base;
+
+	if (offset % _CACHE_LINE_SIZE)
+		return -(offset % _CACHE_LINE_SIZE);
+	else
+		return 0;
+}
+
+/*
+ * Get the current core ID from the thread ID. There will be a 1:1 mapping
+ * between thread and core in testbench usage.
+ */
+static inline int _cache_find_core(const char *func, int line)
+{
+	int core;
+	pthread_t thread_id;
+
+	thread_id = pthread_self();
+
+	/* find core */
+	for (core = 0; core < CONFIG_CORE_COUNT; core++) {
+		if (host_cache->thread_id[core] == thread_id)
+			return core;
+	}
+
+	fprintf(stderr, "error: cant find core for %lu - DEAD at %s:%d\n",
+		thread_id, func, line);
+	assert(0);
+	return -1;
+}
+
+/*
+ * Find elem based on cache address and core number.
+ */
+static inline struct cache_elem *_cache_get_elem_from_cache(void *addr, int core)
 {
 	struct cache_elem *elem;
 	int i;
 
+	/* find elem with cache address */
 	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
 		elem = &host_cache->elem[i];
-		if (!elem->valid) {
-			elem->valid = 1;
+		if (elem->cache[core].data == addr)
 			return elem;
-		}
 	}
 
-	fprintf(stderr, "!!no new cache elems!\n");
+	/* not found */
 	return NULL;
 }
 
-static inline void _cache_free_elem(struct cache_elem *elem)
+/*
+ * Find elem based on uncache address.
+ */
+static inline struct cache_elem *_cache_get_elem_from_uncache(void *addr)
 {
-	int core;
+	struct cache_elem *elem;
+	int i;
 
-	/* TODO check coherency */
-
-	for (core = 0; core < CONFIG_CORE_COUNT; core++) {
-		if (elem->cache[core].data) {
-			free(elem->cache[core].data);
-			free(elem->cache[core].snapshot);
-		}
+	/* find elem with cache address */
+	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
+		elem = &host_cache->elem[i];
+		if (elem->uncache == addr)
+			return elem;
 	}
-	free(elem->uncache);
-	bzero(elem, sizeof(*elem));
+
+	/* not found */
+	return NULL;
 }
 
-/* allocate new data section */
+/*
+ * Find first free elem.
+ */
+static inline struct cache_elem *_cache_get_free_elem(void)
+{
+	struct cache_elem *elem;
+	int i;
+
+	/* find elem with cache address */
+	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
+		elem = &host_cache->elem[i];
+		if (elem->valid)
+			continue;
+		return elem;
+	}
+
+	/* not found */
+	return NULL;
+}
+
+#if 0
+/*
+ * Configure and allocate new data section
+ */
 static inline void *_cache_new_udata(struct cache_elem *elem, int core,
 		const char *func, int line, enum cache_data_type type, size_t size)
 {
@@ -135,48 +247,46 @@ static inline void *_cache_new_cdata(struct cache_elem *elem, int core,
 
 	return centry->data;
 }
+#endif
 
-static inline int _cache_find_core(const char *func, int line)
-{
-	int core;
-	pthread_t thread_id;
-
-	thread_id = pthread_self();
-
-	/* find core */
-	for (core = 0; core < CONFIG_CORE_COUNT; core++) {
-		if (host_cache->thread_id[core] == thread_id)
-			return core;
-	}
-
-	fprintf(stderr, "error: cant find core for %lu - DEAD at %s:%d\n",
-		thread_id, func, line);
-	assert(0);
-	return -1;
-}
-
+/*
+ * Create and setup a new ucache entry
+ */
 static inline void _cache_set_udata(struct cache_elem *elem, int core,
 		const char *func, int line, enum cache_data_type type,
-		void *address, size_t size)
+		void *address, size_t size, int alloc)
 {
 	elem->func = func;
 	elem->line = line;
 	elem->type = type;
 	elem->core = core;
 	elem->size = size;
-	elem->uncache = address;
+
+	/* are we using client copy or do we allocate our copy */
+	if (alloc)
+		elem->uncache = malloc(size);
+	else
+		elem->uncache = address;
 }
 
-static inline void _cache_set_cdata(struct cache_elem *elem, int core,
+/*
+ * Create and setup a new ccache entry
+ */
+static inline void _cache_new_data(struct cache_elem *elem, int core,
 		const char *func, int line, enum cache_data_type type,
-		void *address, size_t size)
+		void *address, size_t size, int alloc)
 {
 	struct cache_entry *centry = &elem->cache[core];
 
 	centry->func = func;
 	centry->line = line;
 	centry->type = type;
-	centry->data = address;
+
+	/* are we using client copy or do we allocate our copy */
+	if (alloc)
+		centry->data = malloc(size);
+	else
+		centry->data = address;
 
 	centry->snapshot = malloc(size);
 
@@ -184,160 +294,222 @@ static inline void _cache_set_cdata(struct cache_elem *elem, int core,
 	memcpy(centry->snapshot, centry->data, size);
 }
 
+/*
+ * Create a new elem from a cached address
+ */
+static inline struct cache_elem *_cache_new_celem(void *addr, int core,
+		const char *func, int line, enum cache_data_type type, size_t size)
+{
+	struct cache_elem *elem;
+	int i;
+
+	elem = _cache_get_free_elem();
+	if (!elem) {
+		fprintf(stderr, "!!no free elems for ccache!\n");
+		return NULL;
+	}
+
+	/* create the uncache mapping  */
+	_cache_set_udata(elem, core, func, line, type, addr, size, 1);
+
+	/* create the cache mappings - we only alloc for new entries */
+	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
+		_cache_new_data(elem, core, func, line, type, addr, size,
+				i == core ? 0 : 1);
+	}
+	return elem;
+}
+
+/*
+ * Create a new elem from a uncached address
+ */
+static inline struct cache_elem *_cache_new_uelem(void *addr, int core,
+		const char *func, int line, enum cache_data_type type, size_t size)
+{
+	struct cache_elem *elem;
+	int i;
+
+	elem = _cache_get_free_elem();
+	if (!elem) {
+		fprintf(stderr, "!!no free elems for ucache!\n");
+		return NULL;
+	}
+
+	/* create the uncache mapping  */
+	_cache_set_udata(elem, core, func, line, type, addr, size, 0);
+
+	/* create the cache mappings */
+	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
+		_cache_new_data(elem, core, func, line, type, addr, size, 1);
+	}
+	return elem;
+}
+
+/*
+ * Free a cache element.
+ */
+static inline void _cache_free_elem(struct cache_elem *elem)
+{
+	int core;
+
+	/* TODO check coherency */
+
+	for (core = 0; core < CONFIG_CORE_COUNT; core++) {
+		if (elem->cache[core].data) {
+			free(elem->cache[core].data);
+			free(elem->cache[core].snapshot);
+		}
+	}
+	free(elem->uncache);
+	bzero(elem, sizeof(*elem));
+}
+
+/*
+ * Invalidate cache elem from uncache mapping.
+ */
+static inline void _cache_elem_invalidate(struct cache_elem *elem, int core,
+		void *addr, size_t size, const char *func, int line)
+{
+	struct cache_entry *centry = &elem->cache[core];
+	int i;
+	long offset = _cache_op_offset(centry->data, addr);
+	size_t inv_size = _cache_op_size(size);
+
+	/* TODO check coherency */
+	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
+		centry = &elem->cache[i];
+
+		/* copy offset and size are aligned to cache lines */
+		memcpy((char*)centry->data + offset, (char*)elem->uncache + offset, inv_size);
+	}
+
+	fprintf(stdout, "inv: core %d offset %ld size %zu\n", core, offset, inv_size);
+}
+
+/*
+ * Writeback cache elem from core N to uncache mapping.
+ */
+static inline void _cache_elem_writeback(struct cache_elem *elem, int core,
+		void *addr, size_t size, const char *func, int line)
+{
+	struct cache_entry *centry = &elem->cache[core];
+	long offset = _cache_op_offset(centry->data, addr);
+	size_t inv_size = _cache_op_size(size);
+
+	/* copy to uncache  - use size as GCC spots the boundaries */
+	memcpy((char*)elem->uncache + offset, (char*)centry->data + offset, size);
+
+	fprintf(stdout, "wb: core %d offset %ld size %zu\n", core, offset, inv_size);
+}
 
 static inline void _dcache_writeback_region(void *addr, size_t size, const char *func, int line)
 {
-	void *backtrace_data[1024];
-	int backtrace_size;
-	int i;
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
-	size_t heap;
+	size_t phy_size = _cache_op_size(size);
 
 	fprintf(stdout, "\n\n");
 
 	fprintf(stdout, "dcache wb %zu bytes at %s %d\n", size, func, line);
-	if (size % 64)
-		fprintf(stdout, "  warning non alignment ! - wb is really %zu bytes\n", size + 64 - (size %64));
+	if (size != phy_size)
+		fprintf(stdout, "  warning non alignment ! - wb is really %zu bytes\n", phy_size);
 
-	/* try and get ptr type */
-	heap = malloc_usable_size(addr);
-	if (!heap)
-		fprintf(stdout, " object is DATA %zu\n", size);
-	else
-		fprintf(stdout, " object is HEAP %zu\n", size);
+	_cache_dump_address_type(addr, size);
+	_cache_dump_backtrace();
 
-	backtrace_size = backtrace(backtrace_data, 1024);
-	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
-
-	/* find elem with uncache address */
-	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
-		elem = &host_cache->elem[i];
-		if (elem->cache[core].data == addr) {
-			fprintf(stdout, "wb: %s() line %d\n", func, line);
-		}
+	/* are we writing back an existing cache object ? */
+	elem = _cache_get_elem_from_cache(addr, core);
+	if (!elem) {
+		/* no elem found so create one */
+		elem = _cache_new_celem(addr, core, func, line, CACHE_DATA_TYPE_DATA_CACHE, size);
+		if (!elem)
+			return;
 	}
+
+	_cache_elem_writeback(elem, core, addr, size, func, line);
 }
 
 static inline void _dcache_invalidate_region(void *addr, size_t size, const char *func, int line)
 {
-	void *backtrace_data[1024];
-	int backtrace_size;
-	int i;
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
-	size_t heap;
+	size_t phy_size = _cache_op_size(size);
 
 	fprintf(stdout, "\n\n");
 
 	fprintf(stdout, "dcache inv %zu bytes at %s %d\n", size, func, line);
-	if (size % 64) {
-		size = size + 64 - (size % 64);
-		fprintf(stdout, "  warning non alignment ! - inv is really %zu bytes\n", size);
+	if (size != phy_size)
+		fprintf(stdout, "  warning non alignment ! - inv is really %zu bytes\n", phy_size);
+
+	_cache_dump_address_type(addr, size);
+	_cache_dump_backtrace();
+
+	/* are we invalidating an existing cache object ? */
+	elem = _cache_get_elem_from_cache(addr, core);
+	if (!elem) {
+		/* no elem found so create one */
+		elem = _cache_new_celem(addr, core, func, line, CACHE_DATA_TYPE_DATA_CACHE, size);
+		if (!elem)
+			return;
 	}
 
-	/* try and get ptr type */
-	heap = malloc_usable_size(addr);
-	if (!heap)
-		fprintf(stdout, " object is DATA %zu\n", size);
-	else
-		fprintf(stdout, " object is HEAP %zu\n", size);
-
-	backtrace_size = backtrace(backtrace_data, 1024);
-	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
-
-	/* find elem with uncache address */
-	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
-		elem = &host_cache->elem[i];
-		if (elem->cache[core].data == addr) {
-			fprintf(stdout, "inv: %s() line %d\n", func, line);
-			goto found;
-		}
-	}
-fprintf(stdout, "%s %d\n", __func__, __LINE__);
-	/* no elem found so create one */
-	elem = _cache_new_elem();
-	if (!elem)
-		return;
-	fprintf(stdout, "%s %d\n", __func__, __LINE__);
-	/* set a new uncache mapping TODO: use orig size ?? */
-	_cache_set_cdata(elem, core, func, line, CACHE_DATA_TYPE_DATA_UNCACHE, addr, size);
-
-found:
-fprintf(stdout, "%s %d\n", __func__, __LINE__);
-	/* TODO do coherency checking */
-	if (elem->uncache)
-		memcpy(elem->uncache, elem->cache[core].data, size);
-	fprintf(stdout, "%s %d\n", __func__, __LINE__);
+	_cache_elem_invalidate(elem, core, addr, size, func, line);
 }
 
 static inline void _icache_invalidate_region(void *addr, size_t size, const char *func, int line)
 {
-	void *backtrace_data[1024];
-	int backtrace_size;
-	int i;
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
-	size_t heap;
+	size_t phy_size = _cache_op_size(size);
 
 	fprintf(stdout, "\n\n");
 
 	fprintf(stdout, "icache inv %zu bytes at %s %d\n", size, func, line);
-	if (size % 64)
-		fprintf(stdout, "  warning non alignment ! - inv is really %zu bytes\n", size + 64 - (size %64));
+	if (size != phy_size)
+		fprintf(stdout, "  warning non alignment ! - inv is really %zu bytes\n", phy_size);
 
-	/* try and get ptr type */
-	heap = malloc_usable_size(addr);
-	if (!heap)
-		fprintf(stdout, " object is DATA %zu\n", size);
-	else
-		fprintf(stdout, " object is HEAP %zu\n", size);
+	_cache_dump_address_type(addr, size);
+	_cache_dump_backtrace();
 
-	backtrace_size = backtrace(backtrace_data, 1024);
-	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
-
-	/* find elem with uncache address */
-	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
-		elem = &host_cache->elem[i];
-		if (elem->cache[core].data == addr) {
-			fprintf(stdout, "invI: %s() line %d\n", func, line);
-		}
+	/* are we invalidating an existing cache object ? */
+	elem = _cache_get_elem_from_cache(addr, core);
+	if (!elem) {
+		/* no elem found so create one */
+		elem = _cache_new_celem(addr, core, func, line, CACHE_DATA_TYPE_DATA_CACHE, size);
+		if (!elem)
+			return;
 	}
+
+	_cache_elem_invalidate(elem, core, addr, size, func, line);
 }
 
 static inline void _dcache_writeback_invalidate_region(void *addr,
 	size_t size, const char *func, int line)
 {
-	void *backtrace_data[1024];
-	int backtrace_size;
-	int i;
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
-	size_t heap;
+	size_t phy_size = _cache_op_size(size);
 
 	fprintf(stdout, "\n\n");
 
 	fprintf(stdout, "dcache wb+inv %zu bytes at %s %d\n", size, func, line);
-	if (size % 64)
-		fprintf(stdout, "  warning non alignment ! - wb+inv is really %zu bytes\n", size + 64 - (size %64));
+	if (size != phy_size)
+		fprintf(stdout, "  warning non alignment ! - wb+inv is really %zu bytes\n", phy_size);
 
-	/* try and get ptr type */
-	heap = malloc_usable_size(addr);
-	if (!heap)
-		fprintf(stdout, " object is DATA %zu\n", size);
-	else
-		fprintf(stdout, " object is HEAP %zu\n", size);
+	_cache_dump_address_type(addr, size);
+	_cache_dump_backtrace();
 
-	backtrace_size = backtrace(backtrace_data, 1024);
-	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
-
-	/* find elem with uncache address */
-	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
-		elem = &host_cache->elem[i];
-		if (elem->cache[core].data == addr) {
-			fprintf(stdout, "wb-inv: %s() line %d\n", func, line);
-		}
+	/* are we invalidating an existing cache object ? */
+	elem = _cache_get_elem_from_cache(addr, core);
+	if (!elem) {
+		/* no elem found so create one */
+		elem = _cache_new_celem(addr, core, func, line, CACHE_DATA_TYPE_DATA_CACHE, size);
+		if (!elem)
+			return;
 	}
+
+	_cache_elem_writeback(elem, core, addr, size, func, line);
+	_cache_elem_invalidate(elem, core, addr, size, func, line);
 }
 
 #define dcache_writeback_region(addr, size) \
