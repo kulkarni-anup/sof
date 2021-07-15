@@ -922,8 +922,7 @@ static SHARED_DATA struct comp_driver_info comp_volume_info = {
  */
 UT_STATIC void sys_comp_volume_init(void)
 {
-	comp_register(platform_shared_get(&comp_volume_info,
-					  sizeof(comp_volume_info)));
+	comp_register(&comp_volume_info);
 }
 
 DECLARE_MODULE(sys_comp_volume_init);

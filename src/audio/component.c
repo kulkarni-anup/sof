@@ -133,7 +133,7 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 
 void sys_comp_init(struct sof *sof)
 {
-	sof->comp_drivers = platform_shared_get(&cd, sizeof(cd));
+	sof->comp_drivers = &cd;
 
 	list_init(&sof->comp_drivers->list);
 	spinlock_init(&sof->comp_drivers->lock);

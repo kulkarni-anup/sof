@@ -97,8 +97,7 @@ static inline void pipeline_posn_offset_put(uint32_t posn_offset)
 
 void pipeline_posn_init(struct sof *sof)
 {
-	sof->pipeline_posn = platform_shared_get(&pipeline_posn,
-						 sizeof(pipeline_posn));
+	sof->pipeline_posn = &pipeline_posn;
 	spinlock_init(&sof->pipeline_posn->lock);
 }
 
