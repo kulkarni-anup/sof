@@ -51,6 +51,7 @@ struct cache_entry {
 
 /* uncache to cache based mapping */
 struct cache_elem {
+	int id;			/* monotonic */
 	int valid;
 	void *uncache; 		/* align on cache size */
 	size_t size;		/* size of mapping */
@@ -68,6 +69,7 @@ struct cache_context {
 };
 
 extern struct cache_context *host_cache;
+extern int _elem_id;
 
 /* tunable parameters */
 #define _CACHE_LINE_SIZE	64
@@ -83,9 +85,9 @@ static inline void _cache_dump_address_type(void *addr, size_t size)
 	/* try and get ptr type */
 	heap = malloc_usable_size(addr);
 	if (!heap)
-		fprintf(stdout, " object is DATA %zu\n", size);
+		fprintf(stdout, "  object is DATA %zu\n", size);
 	else
-		fprintf(stdout, " object is HEAP %zu\n", size);
+		fprintf(stdout, "  object is HEAP %zu\n", size);
 }
 
 /*
@@ -95,9 +97,34 @@ static inline void _cache_dump_backtrace(void)
 {
 	void *backtrace_data[_BACTRACE_SIZE];
 	int backtrace_size;
-
+return;
 	backtrace_size = backtrace(backtrace_data, _BACTRACE_SIZE);
 	backtrace_symbols_fd(backtrace_data, backtrace_size, 1);
+}
+
+/*
+ * Dump the cachelines
+ */
+static inline void _cache_dump_cacheline(const char * text, char *addr, size_t size)
+{
+	uint32_t *d;
+	int i, rem;
+
+	fprintf(stdout, "data: %s\n", text);
+
+	rem = size % 4;
+	size -= rem;
+
+	for (i = 0; i < size; i += 4) {
+		d = (uint32_t*)(addr + i);
+		if (i % 16 == 0)
+			fprintf(stdout, "0x%4.4x : ", i);
+		if (i % 16 == 12)
+			fprintf(stdout, "0x%8.8x\n", d[0]);
+		else
+			fprintf(stdout, "0x%8.8x ", d[0]);
+	}
+	fprintf(stdout, "\n");
 }
 
 /*
@@ -164,8 +191,10 @@ static inline struct cache_elem *_cache_get_elem_from_cache(void *addr, int core
 	/* find elem with cache address */
 	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
 		elem = &host_cache->elem[i];
-		if (elem->cache[core].data == addr)
+		if (elem->cache[core].data == addr) {
+			fprintf(stdout, "   get celem id = %d\n", elem->id);
 			return elem;
+		}
 	}
 
 	/* not found */
@@ -183,8 +212,10 @@ static inline struct cache_elem *_cache_get_elem_from_uncache(void *addr)
 	/* find elem with cache address */
 	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
 		elem = &host_cache->elem[i];
-		if (elem->uncache == addr)
+		if (elem->uncache == addr) {
+			fprintf(stdout, "   get uelem id = %d\n", elem->id);
 			return elem;
+		}
 	}
 
 	/* not found */
@@ -204,50 +235,14 @@ static inline struct cache_elem *_cache_get_free_elem(void)
 		elem = &host_cache->elem[i];
 		if (elem->valid)
 			continue;
+		elem->id = _elem_id++;
+		fprintf(stdout, "   elem id = %d\n", elem->id);
 		return elem;
 	}
 
 	/* not found */
 	return NULL;
 }
-
-#if 0
-/*
- * Configure and allocate new data section
- */
-static inline void *_cache_new_udata(struct cache_elem *elem, int core,
-		const char *func, int line, enum cache_data_type type, size_t size)
-{
-	elem->func = func;
-	elem->line = line;
-	elem->type = type;
-	elem->core = core;
-	elem->size = size;
-	elem->uncache = malloc(size);
-
-	return elem->uncache;
-}
-
-static inline void *_cache_new_cdata(struct cache_elem *elem, int core,
-		const char *func, int line, enum cache_data_type type, size_t size)
-{
-	struct cache_entry *centry = &elem->cache[core];
-
-	centry->func = func;
-	centry->line = line;
-	centry->action = CACHE_ACTION_NONE;
-	centry->type = type;
-
-	/* TODO: we can inject tracking data here or zeors */
-	centry->data = malloc(size);
-	centry->snapshot = malloc(size);
-
-	/* memcpy and take a snapshot of original data for comparison later */
-	memcpy(centry->snapshot, centry->data, size);
-
-	return centry->data;
-}
-#endif
 
 /*
  * Create and setup a new ucache entry
@@ -309,6 +304,8 @@ static inline struct cache_elem *_cache_new_celem(void *addr, int core,
 		return NULL;
 	}
 
+	fprintf(stdout, "  new c cache elem size %zu\n", size);
+
 	/* create the uncache mapping  */
 	_cache_set_udata(elem, core, func, line, type, addr, size, 1);
 
@@ -334,6 +331,8 @@ static inline struct cache_elem *_cache_new_uelem(void *addr, int core,
 		fprintf(stderr, "!!no free elems for ucache!\n");
 		return NULL;
 	}
+
+	fprintf(stdout, "  new u cache elem size %zu\n", size);
 
 	/* create the uncache mapping  */
 	_cache_set_udata(elem, core, func, line, type, addr, size, 0);
@@ -376,12 +375,18 @@ static inline void _cache_elem_invalidate(struct cache_elem *elem, int core,
 	size_t inv_size = _cache_op_size(size);
 
 	/* TODO check coherency */
+	_cache_dump_cacheline("inv uncache src", (char*)elem->uncache + offset, inv_size);
 	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
 		centry = &elem->cache[i];
+		fprintf(stdout, "core %d\n", i);
+		_cache_dump_cacheline("inv before", (char*)centry->data + offset, inv_size);
 
 		/* copy offset and size are aligned to cache lines */
 		memcpy((char*)centry->data + offset, (char*)elem->uncache + offset, inv_size);
+
+		_cache_dump_cacheline("inv after", (char*)centry->data + offset, inv_size);
 	}
+
 
 	fprintf(stdout, "inv: core %d offset %ld size %zu\n", core, offset, inv_size);
 }
@@ -396,13 +401,18 @@ static inline void _cache_elem_writeback(struct cache_elem *elem, int core,
 	long offset = _cache_op_offset(centry->data, addr);
 	size_t inv_size = _cache_op_size(size);
 
+	_cache_dump_cacheline("wb before", (char*)elem->uncache + offset, inv_size);
+
 	/* copy to uncache  - use size as GCC spots the boundaries */
 	memcpy((char*)elem->uncache + offset, (char*)centry->data + offset, size);
+
+	_cache_dump_cacheline("wb after", (char*)elem->uncache + offset, inv_size);
 
 	fprintf(stdout, "wb: core %d offset %ld size %zu\n", core, offset, inv_size);
 }
 
-static inline void _dcache_writeback_region(void *addr, size_t size, const char *func, int line)
+static inline void _dcache_writeback_region(void *addr, size_t size, const char *file,
+		const char *func, int line)
 {
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
@@ -410,9 +420,9 @@ static inline void _dcache_writeback_region(void *addr, size_t size, const char 
 
 	fprintf(stdout, "\n\n");
 
-	fprintf(stdout, "dcache wb %zu bytes at %s %d\n", size, func, line);
+	fprintf(stdout, "dcache wb %zu bytes at %s() %d - %s\n", size, func, line, file);
 	if (size != phy_size)
-		fprintf(stdout, "  warning non alignment ! - wb is really %zu bytes\n", phy_size);
+		fprintf(stdout, "  ! warning non alignment ! - wb is really %zu bytes\n", phy_size);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
@@ -429,7 +439,8 @@ static inline void _dcache_writeback_region(void *addr, size_t size, const char 
 	_cache_elem_writeback(elem, core, addr, size, func, line);
 }
 
-static inline void _dcache_invalidate_region(void *addr, size_t size, const char *func, int line)
+static inline void _dcache_invalidate_region(void *addr, size_t size, const char *file,
+		const char *func, int line)
 {
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
@@ -437,9 +448,9 @@ static inline void _dcache_invalidate_region(void *addr, size_t size, const char
 
 	fprintf(stdout, "\n\n");
 
-	fprintf(stdout, "dcache inv %zu bytes at %s %d\n", size, func, line);
+	fprintf(stdout, "dcache inv %zu bytes at %s() %d - %s\n", size, func, line, file);
 	if (size != phy_size)
-		fprintf(stdout, "  warning non alignment ! - inv is really %zu bytes\n", phy_size);
+		fprintf(stdout, "  ! warning non alignment ! - inv is really %zu bytes\n", phy_size);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
@@ -456,7 +467,8 @@ static inline void _dcache_invalidate_region(void *addr, size_t size, const char
 	_cache_elem_invalidate(elem, core, addr, size, func, line);
 }
 
-static inline void _icache_invalidate_region(void *addr, size_t size, const char *func, int line)
+static inline void _icache_invalidate_region(void *addr, size_t size, const char *file,
+		const char *func, int line)
 {
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
@@ -464,9 +476,9 @@ static inline void _icache_invalidate_region(void *addr, size_t size, const char
 
 	fprintf(stdout, "\n\n");
 
-	fprintf(stdout, "icache inv %zu bytes at %s %d\n", size, func, line);
+	fprintf(stdout, "icache inv %zu bytes at %s() %d - %s\n", size, func, line, file);
 	if (size != phy_size)
-		fprintf(stdout, "  warning non alignment ! - inv is really %zu bytes\n", phy_size);
+		fprintf(stdout, "  ! warning non alignment ! - inv is really %zu bytes\n", phy_size);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
@@ -484,7 +496,7 @@ static inline void _icache_invalidate_region(void *addr, size_t size, const char
 }
 
 static inline void _dcache_writeback_invalidate_region(void *addr,
-	size_t size, const char *func, int line)
+	size_t size, const char *file, const char *func, int line)
 {
 	int core = _cache_find_core(func, line);
 	struct cache_elem *elem;
@@ -492,9 +504,9 @@ static inline void _dcache_writeback_invalidate_region(void *addr,
 
 	fprintf(stdout, "\n\n");
 
-	fprintf(stdout, "dcache wb+inv %zu bytes at %s %d\n", size, func, line);
+	fprintf(stdout, "dcache wb+inv %zu bytes at %s() %d - %s\n", size, func, line, file);
 	if (size != phy_size)
-		fprintf(stdout, "  warning non alignment ! - wb+inv is really %zu bytes\n", phy_size);
+		fprintf(stdout, "  ! warning non alignment ! - wb+inv is really %zu bytes\n", phy_size);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
@@ -513,16 +525,16 @@ static inline void _dcache_writeback_invalidate_region(void *addr,
 }
 
 #define dcache_writeback_region(addr, size) \
-	_dcache_writeback_region(addr, size, __func__, __LINE__)
+	_dcache_writeback_region(addr, size, __FILE__, __func__, __LINE__)
 
 #define dcache_invalidate_region(addr, size) \
-	_dcache_invalidate_region(addr, size, __func__, __LINE__)
+	_dcache_invalidate_region(addr, size, __FILE__, __func__, __LINE__)
 
 #define icache_invalidate_region(addr, size) \
-	_icache_invalidate_region(addr, size, __func__, __LINE__)
+	_icache_invalidate_region(addr, size, __FILE__, __func__, __LINE__)
 
 #define dcache_writeback_invalidate_region(addr, size) \
-	_dcache_writeback_invalidate_region(addr, size, __func__, __LINE__)
+	_dcache_writeback_invalidate_region(addr, size, __FILE__, __func__, __LINE__)
 
 #if 0
 static inline void dcache_writeback_region(void *addr, size_t size) {}

@@ -48,7 +48,7 @@ uint8_t *get_library_mailbox(void);
  * 1) Creating a new cache mapping for a heap object.
  * 2) Creating a new cache and unache mapping for a DATA section object.
  */
-static inline void *_uncache_to_cache(void *address, const char *func, int line,
+static inline void *_uncache_to_cache(void *address, const char *file, const char *func, int line,
 		size_t size)
 {
 	struct cache_elem *elem;
@@ -57,10 +57,11 @@ static inline void *_uncache_to_cache(void *address, const char *func, int line,
 	fprintf(stdout, "\n\n");
 
 	/* uncache area not found so this must be DATA section*/
-	fprintf(stdout, "uncache -> cache: %s() line %d size %zu\n", func, line, size);
+	fprintf(stdout, "uncache -> cache: %s() line %d size %zu - %s\n", func, line, size, file);
 
 	_cache_dump_address_type(address, size);
 	_cache_dump_backtrace();
+	_cache_dump_cacheline("uncache -> cache", address, size);
 
 	/* find elem with uncache address */
 	elem = _cache_get_elem_from_uncache(address);
@@ -76,7 +77,7 @@ static inline void *_uncache_to_cache(void *address, const char *func, int line,
 }
 
 #define uncache_to_cache(address)	\
-	_uncache_to_cache(address, __func__, __LINE__, sizeof(*address))
+	_uncache_to_cache(address, __FILE__, __func__, __LINE__, sizeof(*address))
 
 /*
  * Use uncache address from caller and return cache[core] address. This can
@@ -85,7 +86,7 @@ static inline void *_uncache_to_cache(void *address, const char *func, int line,
  * 1) Creating a new cache mapping for a heap object.
  * 2) Creating a new cache and unache mapping for a DATA section object.
  */
-static inline void *_cache_to_uncache(void *address, const char *func, int line,
+static inline void *_cache_to_uncache(void *address, const char *file, const char *func, int line,
 		size_t size)
 {
 	struct cache_elem *elem;
@@ -94,10 +95,11 @@ static inline void *_cache_to_uncache(void *address, const char *func, int line,
 	fprintf(stdout, "\n\n");
 
 	/* uncache area not found so this must be DATA section*/
-	fprintf(stdout, "cache -> uncache: %s() line %d\n new object size %zu\n", func, line, size);
+	fprintf(stdout, "cache -> uncache: %s() line %d\n new object size %zu - %s\n", func, line, size, file);
 
 	_cache_dump_address_type(address, size);
 	_cache_dump_backtrace();
+	_cache_dump_cacheline("cache -> uncache", address, size);
 
 	elem = _cache_get_elem_from_cache(address, core);
 	if (!elem) {
@@ -111,9 +113,9 @@ static inline void *_cache_to_uncache(void *address, const char *func, int line,
 }
 
 #define cache_to_uncache(address) \
-	_cache_to_uncache(address, __func__, __LINE__, sizeof(*address))
+	_cache_to_uncache(address, __FILE__, __func__, __LINE__, sizeof(*address))
 
-static inline int _is_uncache(void *address, const char *func, int line,
+static inline int _is_uncache(void *address, const char *file, const char *func, int line,
 		size_t size)
 {
 	struct cache_elem *elem;
@@ -123,36 +125,29 @@ static inline int _is_uncache(void *address, const char *func, int line,
 	/* find elem with uncache address - NOT FOOLPROOF on host */
 	elem = _cache_get_elem_from_uncache(address);
 	if (elem) {
-		fprintf(stdout, "is uncache found: %s() line %d\n", func, line);
+		fprintf(stdout, "is uncache found: %s() line %d - %s\n", func, line, file);
 		return 1;
 	}
 
-	fprintf(stdout, "is uncache not found: %s() line %d\n", func, line);
+	fprintf(stdout, "is uncache not found: %s() line %d - %s\n", func, line, file);
 	return 0;
 }
 
 /* check for memory type - not foolproof here */
 #define is_uncached(address)	\
-	_is_uncache(address, __func__, __LINE__, sizeof(*address))
+	_is_uncache(address, __FILE__, __func__, __LINE__, sizeof(*address))
 
 #define platform_shared_get(ptr, bytes) 			\
-	({dcache_invalidate_region(ptr, bytes);			\
-	_cache_to_uncache(ptr, __func__, __LINE__, sizeof(*ptr));}) 		\
+	({fprintf(stdout, "platform_get_shared\n");			\
+	dcache_invalidate_region(ptr, bytes);			\
+	_cache_to_uncache(ptr, __FILE__, __func__, __LINE__, sizeof(*ptr));}) 		\
 
 
 void platform_init_memmap(struct sof *sof);
 
 #define platform_rfree_prepare(ptr) \
-	({fprintf(stdout, "prepare free %s() line %d size\n", __func__, __LINE__, sizeof(*ptr)); \
+	({fprintf(stdout, "prepare free %s() line %d size - %s\n", __func__, __LINE__, sizeof(*ptr), __FILE__); \
 	ptr;})
-
-
-
-// wb will copy cache[core] bytes to uncache in 64byte chunks
-
-// wb inv copy cache[core] bytes to uncache in 64 byte chunks and also to other cache
-
-// alloc will alloc uncache and cache
 
 #define ARCH_OOPS_SIZE	0
 

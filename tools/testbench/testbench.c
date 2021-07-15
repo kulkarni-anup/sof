@@ -61,6 +61,7 @@ struct cache_context hc = {0};
 
 /* cache debugger */
 struct cache_context *host_cache = &hc;
+int _elem_id = 0;
 
 /*
  * Parse output filenames from user input
