@@ -61,7 +61,7 @@ static inline void *_uncache_to_cache(void *address, const char *file, const cha
 
 	_cache_dump_address_type(address, size);
 	_cache_dump_backtrace();
-	_cache_dump_cacheline("uncache -> cache", address, size);
+	_cache_dump_cacheline("uncache -> cache", address, 0, size, size);
 
 	/* find elem with uncache address */
 	elem = _cache_get_elem_from_uncache(address);
@@ -99,7 +99,7 @@ static inline void *_cache_to_uncache(void *address, const char *file, const cha
 
 	_cache_dump_address_type(address, size);
 	_cache_dump_backtrace();
-	_cache_dump_cacheline("cache -> uncache", address, size);
+	_cache_dump_cacheline("cache -> uncache", address, 0, size, size);
 
 	elem = _cache_get_elem_from_cache(address, core);
 	if (!elem) {

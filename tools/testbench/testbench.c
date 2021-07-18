@@ -469,11 +469,14 @@ out:
 	for (i = 0; i < tp.output_file_num; i++)
 		free(tp.output_file[i]);
 
+	_cache_free_all();
+
 	/* close shared library objects */
 	for (i = 0; i < NUM_WIDGETS_SUPPORTED; i++) {
 		if (lib_table[i].handle)
 			dlclose(lib_table[i].handle);
 	}
+
 
 	return EXIT_SUCCESS;
 }

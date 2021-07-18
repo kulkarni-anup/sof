@@ -42,6 +42,7 @@ enum cache_data_type {
 struct cache_entry {
 	void *data;
 	void *snapshot;
+	int data_free;
 	int line; 		/* line of last action */
 	const char *func; 	/*func of last action */
 	enum cache_action action; 	/* last action */
@@ -54,6 +55,7 @@ struct cache_elem {
 	int id;			/* monotonic */
 	int valid;
 	void *uncache; 		/* align on cache size */
+	int uncache_free;
 	size_t size;		/* size of mapping */
 	int line; 		/* allocator line */
 	const char *func; 	/* allocator func */
@@ -105,18 +107,32 @@ return;
 /*
  * Dump the cachelines
  */
-static inline void _cache_dump_cacheline(const char * text, char *addr, size_t size)
+static inline void _cache_dump_cacheline(const char * text, char *base,
+		size_t offset, size_t size, size_t region_size)
 {
 	uint32_t *d;
-	int i, rem;
-
+	int i = 0, rem;
+return;
 	fprintf(stdout, "data: %s\n", text);
 
-	rem = size % 4;
+	if (offset > region_size) {
+		fprintf(stderr, "error: offset %zu greater than region %zu\n",
+				offset, region_size);
+		return;
+	}
+
+	if (offset + size > region_size) {
+		fprintf(stderr, "error: offset %zu + size %zu greater than region %zu\n",
+				offset, size, region_size);
+		size = region_size - offset;
+		fprintf(stderr, "error: resized to %zu (CHECK CODE AS RESIZE NOT DONE IN HW)\n", size);
+	}
+
+	rem = size % 16;
 	size -= rem;
 
 	for (i = 0; i < size; i += 4) {
-		d = (uint32_t*)(addr + i);
+		d = (uint32_t*)(base + offset + i);
 		if (i % 16 == 0)
 			fprintf(stdout, "0x%4.4x : ", i);
 		if (i % 16 == 12)
@@ -124,6 +140,22 @@ static inline void _cache_dump_cacheline(const char * text, char *addr, size_t s
 		else
 			fprintf(stdout, "0x%8.8x ", d[0]);
 	}
+
+	d = (uint32_t*)(base + offset + i);
+	switch (rem) {
+	case 4:
+		fprintf(stdout, "0x%4.4x : 0x%8.8x\n", i, d[0]);
+		break;
+	case 8:
+		fprintf(stdout, "0x%4.4x : 0x%8.8x 0x%8.8x\n", i, d[0], d[1]);
+		break;
+	case 12:
+		fprintf(stdout, "0x%4.4x : 0x%8.8x 0x%8.8x 0x%8.8x\n", i, d[0], d[1], d[2]);
+		break;
+	default:
+		break;
+	}
+
 	fprintf(stdout, "\n");
 }
 
@@ -236,7 +268,8 @@ static inline struct cache_elem *_cache_get_free_elem(void)
 		if (elem->valid)
 			continue;
 		elem->id = _elem_id++;
-		fprintf(stdout, "   elem id = %d\n", elem->id);
+		elem->valid = 1;
+		fprintf(stdout, "   elem %p id = %d\n", elem, elem->id);
 		return elem;
 	}
 
@@ -257,10 +290,13 @@ static inline void _cache_set_udata(struct cache_elem *elem, int core,
 	elem->core = core;
 	elem->size = size;
 
+	assert(!elem->uncache);
+
 	/* are we using client copy or do we allocate our copy */
-	if (alloc)
-		elem->uncache = malloc(size);
-	else
+	if (alloc) {
+		elem->uncache_free = 1;
+		elem->uncache = calloc(size, 1);
+	} else
 		elem->uncache = address;
 }
 
@@ -277,10 +313,13 @@ static inline void _cache_new_data(struct cache_elem *elem, int core,
 	centry->line = line;
 	centry->type = type;
 
+	assert(!centry->data);
+
 	/* are we using client copy or do we allocate our copy */
-	if (alloc)
-		centry->data = malloc(size);
-	else
+	if (alloc) {
+		centry->data_free = 1;
+		centry->data = calloc(size, 1);
+	} else
 		centry->data = address;
 
 	centry->snapshot = malloc(size);
@@ -304,7 +343,7 @@ static inline struct cache_elem *_cache_new_celem(void *addr, int core,
 		return NULL;
 	}
 
-	fprintf(stdout, "  new c cache elem size %zu\n", size);
+	fprintf(stdout, "  new c cache elem size %zu:0x%lx\n", size, size);
 
 	/* create the uncache mapping  */
 	_cache_set_udata(elem, core, func, line, type, addr, size, 1);
@@ -332,7 +371,7 @@ static inline struct cache_elem *_cache_new_uelem(void *addr, int core,
 		return NULL;
 	}
 
-	fprintf(stdout, "  new u cache elem size %zu\n", size);
+	fprintf(stdout, "  new u cache elem size %zu:0x%lx\n", size, size);
 
 	/* create the uncache mapping  */
 	_cache_set_udata(elem, core, func, line, type, addr, size, 0);
@@ -363,6 +402,26 @@ static inline void _cache_free_elem(struct cache_elem *elem)
 	bzero(elem, sizeof(*elem));
 }
 
+static inline void _cache_free_all(void)
+{
+	struct cache_elem *elem;
+	int i, j;
+
+	/* TODO check coherency */
+
+	for (i = 0; i < HOST_CACHE_ELEMS; i++) {
+		elem = &host_cache->elem[i];
+		if (elem->uncache_free)
+			free(elem->uncache);
+		for (j = 0; j < CONFIG_CORE_COUNT; j++) {
+			if (elem->cache[j].data_free)
+				free(elem->cache[j].data);
+			if (elem->cache[j].snapshot)
+				free(elem->cache[j].snapshot);
+		}
+	}
+}
+
 /*
  * Invalidate cache elem from uncache mapping.
  */
@@ -375,16 +434,16 @@ static inline void _cache_elem_invalidate(struct cache_elem *elem, int core,
 	size_t inv_size = _cache_op_size(size);
 
 	/* TODO check coherency */
-	_cache_dump_cacheline("inv uncache src", (char*)elem->uncache + offset, inv_size);
+	_cache_dump_cacheline("inv uncache src", (char*)elem->uncache, offset, inv_size, elem->size);
 	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
 		centry = &elem->cache[i];
 		fprintf(stdout, "core %d\n", i);
-		_cache_dump_cacheline("inv before", (char*)centry->data + offset, inv_size);
+		_cache_dump_cacheline("inv before", (char*)centry->data,  offset, inv_size, elem->size);
 
 		/* copy offset and size are aligned to cache lines */
 		memcpy((char*)centry->data + offset, (char*)elem->uncache + offset, inv_size);
 
-		_cache_dump_cacheline("inv after", (char*)centry->data + offset, inv_size);
+		_cache_dump_cacheline("inv after", (char*)centry->data, offset, inv_size, elem->size);
 	}
 
 
@@ -401,12 +460,12 @@ static inline void _cache_elem_writeback(struct cache_elem *elem, int core,
 	long offset = _cache_op_offset(centry->data, addr);
 	size_t inv_size = _cache_op_size(size);
 
-	_cache_dump_cacheline("wb before", (char*)elem->uncache + offset, inv_size);
+	_cache_dump_cacheline("wb before", (char*)elem->uncache,  offset, size, elem->size);
 
 	/* copy to uncache  - use size as GCC spots the boundaries */
 	memcpy((char*)elem->uncache + offset, (char*)centry->data + offset, size);
 
-	_cache_dump_cacheline("wb after", (char*)elem->uncache + offset, inv_size);
+	_cache_dump_cacheline("wb after", (char*)elem->uncache, offset, size, elem->size);
 
 	fprintf(stdout, "wb: core %d offset %ld size %zu\n", core, offset, inv_size);
 }
