@@ -61,13 +61,15 @@ static inline void *_uncache_to_cache(void *address, const char *file, const cha
 
 	_cache_dump_address_type(address, size);
 	_cache_dump_backtrace();
-	_cache_dump_cacheline("uncache -> cache", address, 0, size, size);
+	_cache_dump_cacheline("uncache -> cache", address, 0, size, size, NULL);
 
 	/* find elem with uncache address */
 	elem = _cache_get_elem_from_uncache(address);
 	if (!elem) {
 		/* no elem found so create one */
-		elem = _cache_new_uelem(address, core, func, line, CACHE_DATA_TYPE_DATA_UNCACHE, size);
+		elem = _cache_new_uelem(address, core, func, line,
+				CACHE_DATA_TYPE_DATA_UNCACHE, size,
+				CACHE_ACTION_NONE);
 		if (!elem)
 			return NULL;
 
@@ -99,17 +101,19 @@ static inline void *_cache_to_uncache(void *address, const char *file, const cha
 
 	_cache_dump_address_type(address, size);
 	_cache_dump_backtrace();
-	_cache_dump_cacheline("cache -> uncache", address, 0, size, size);
+	_cache_dump_cacheline("cache -> uncache", address, 0, size, size, NULL);
 
 	elem = _cache_get_elem_from_cache(address, core);
 	if (!elem) {
 		/* no elem found so create one */
-		elem = _cache_new_celem(address, core, func, line, CACHE_DATA_TYPE_DATA_CACHE, size);
+		elem = _cache_new_celem(address, core, func, line,
+				CACHE_DATA_TYPE_DATA_CACHE, size,
+				CACHE_ACTION_NONE);
 		if (!elem)
 			return NULL;
 	}
 
-	return elem->uncache;
+	return elem->uncache.data;
 }
 
 #define cache_to_uncache(address) \
