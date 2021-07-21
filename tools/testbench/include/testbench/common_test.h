@@ -21,7 +21,7 @@
 #define DEBUG_MSG_LEN		256
 #define MAX_LIB_NAME_LEN	256
 
-#define MAX_OUTPUT_FILE_NUM	4
+#define MAX_OUTPUT_FILE_NUM	16
 
 /* number of widgets types supported in testbench */
 #define NUM_WIDGETS_SUPPORTED	11
@@ -49,6 +49,7 @@ struct testbench_prm {
 	int copy_iterations;
 	bool copy_check;
 	int dynamic_pipeline_iterations;
+	int num_vcores;
 };
 
 struct shared_lib_table {

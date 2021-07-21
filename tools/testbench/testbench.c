@@ -183,7 +183,7 @@ static int parse_input_args(int argc, char **argv, struct testbench_prm *tp)
 	int option = 0;
 	int ret = 0;
 
-	while ((option = getopt(argc, argv, "hdi:o:t:b:a:r:R:c:C:P:")) != -1) {
+	while ((option = getopt(argc, argv, "hdi:o:t:b:a:r:R:c:C:P:V")) != -1) {
 		switch (option) {
 		/* input sample file */
 		case 'i':
@@ -242,6 +242,11 @@ static int parse_input_args(int argc, char **argv, struct testbench_prm *tp)
 			tp->dynamic_pipeline_iterations = atoi(optarg);
 			break;
 
+		/* number of virtual cores */
+		case 'V':
+			tp->num_vcores = atoi(optarg);
+			break;
+
 		/* print usage */
 		default:
 			fprintf(stderr, "unknown option %c\n", option);
@@ -259,8 +264,16 @@ static int parse_input_args(int argc, char **argv, struct testbench_prm *tp)
 	return ret;
 }
 
-static int pipline_run(struct testbench_prm *tp, int count)
+struct pipeline_thread_data {
+	struct testbench_prm *tp;
+	int count;			/* copy iteration count */
+	int pipeline_id;
+};
+
+static int pipline_load_run(struct pipeline_thread_data *ptd)
 {
+	struct testbench_prm *tp = ptd->tp;
+	int count = ptd->count;
 	struct ipc_comp_dev *pcm_dev;
 	struct pipeline *p;
 	struct pipeline *curr_p;
@@ -388,10 +401,35 @@ static int pipline_run(struct testbench_prm *tp, int count)
 	return 0;
 }
 
+static void *pipline_thread(void *data)
+{
+	struct pipeline_thread_data *ptd = data;
+	struct testbench_prm *tp = ptd->tp;
+	int dp_count = 0;
+	int err;
+
+	/* build, run and teardown pipelines */
+	while (dp_count < tp->dynamic_pipeline_iterations) {
+		fprintf(stdout, "pipeline run %d/%d\n", ++dp_count,
+			tp->dynamic_pipeline_iterations);
+
+		err = pipline_load_run(ptd);
+		if (err < 0) {
+			fprintf(stderr, "error: pipeline run %d failed %d\n",
+				dp_count, err);
+			break;
+		}
+		ptd->count++;
+	}
+
+	return NULL;
+}
+
 int main(int argc, char **argv)
 {
 	struct testbench_prm tp;
-	int i, err, dp_count = 0;
+	struct pipeline_thread_data ptd[CACHE_VCORE_COUNT];
+	int i, err;
 
 	/* initialize input and output sample rates, files, etc. */
 	tp.fs_in = 0;
@@ -406,9 +444,7 @@ int main(int argc, char **argv)
 	tp.max_pipeline_id = 0;
 	tp.copy_check = false;
 	tp.dynamic_pipeline_iterations = 1;
-
-	/* init cache checker */
-	hc.thread_id[0] = pthread_self();
+	tp.num_vcores = 0;
 
 	/* command line arguments*/
 	err = parse_input_args(argc, argv, &tp);
@@ -440,6 +476,14 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
+	if (tp.num_vcores > CACHE_VCORE_COUNT) {
+		fprintf(stderr, "virtual core count %d is greater than max %d\n",
+				tp.num_vcores, CACHE_VCORE_COUNT);
+		print_usage(argv[0]);
+		exit(EXIT_FAILURE);
+	} else if (!tp.num_vcores)
+		tp.num_vcores = 1;
+
 	/* initialize ipc and scheduler */
 	if (tb_pipeline_setup(sof_get()) < 0) {
 		fprintf(stderr, "error: pipeline init\n");
@@ -447,15 +491,18 @@ int main(int argc, char **argv)
 	}
 
 	/* build, run and teardown pipelines */
-	while (dp_count < tp.dynamic_pipeline_iterations) {
-		fprintf(stdout, "pipeline run %d/%d\n", ++dp_count,
-			tp.dynamic_pipeline_iterations);
-		err = pipline_run(&tp, dp_count);
-		if (err < 0) {
-			fprintf(stderr, "error: pipeline run %d failed %d\n",
-				dp_count, err);
-			break;
-		}
+	for (i = 0; i < tp.num_vcores; i++) {
+		ptd[i].pipeline_id = i;
+		ptd[i].tp = &tp;
+		ptd[i].count = 0;
+		err = pthread_create(&hc.thread_id[i], NULL,
+				pipline_thread, &ptd[i]);
+	}
+
+	/* wait for all threads to complete */
+	for (i = 0; i < tp.num_vcores; i++) {
+		if (hc.thread_id[i])
+			err = pthread_join(hc.thread_id[i], NULL);
 	}
 
 	/* free other core FW services */

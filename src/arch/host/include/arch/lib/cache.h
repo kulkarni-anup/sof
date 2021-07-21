@@ -27,6 +27,7 @@
 /* tunable parameters */
 #define _CACHE_LINE_SIZE	64
 #define _BACTRACE_SIZE		1024
+#define CACHE_VCORE_COUNT	4
 
 enum cache_action {
 	CACHE_ACTION_NONE	= 0,
@@ -53,6 +54,7 @@ struct cache_entry {
 	enum cache_data_type type;	/* heap, data */
 	void *symbols[_BACTRACE_SIZE];		/* last stack usage */
 	int symbol_size;
+	int snaphost_new;
 };
 
 /* uncache to cache based mapping */
@@ -61,12 +63,12 @@ struct cache_elem {
 	int used;
 	size_t size;
 	struct cache_entry uncache;
-	struct cache_entry cache[CONFIG_CORE_COUNT];
+	struct cache_entry cache[CACHE_VCORE_COUNT];
 };
 
 struct cache_context {
 	int num_elems;
-	pthread_t thread_id[CONFIG_CORE_COUNT];
+	pthread_t thread_id[CACHE_VCORE_COUNT];
 	struct cache_elem elem[HOST_CACHE_ELEMS];
 };
 
@@ -76,8 +78,8 @@ extern int _elem_id;
 /* debug options */
 #define CACHE_DEBUG_STACK_TRACE		0
 #define CACHE_DEBUG_CACHELINES		0
-#define CACHE_DEBUG_MEM_TYPE		0
-#define CACHE_DEBUG_ELEM_ID		0
+#define CACHE_DEBUG_MEM_TYPE		1
+#define CACHE_DEBUG_ELEM_ID		1
 
 /*
  * Dump the data object type i.e. it's either DATA or heap.
@@ -225,7 +227,7 @@ static inline int _cache_find_core(const char *func, int line)
 	thread_id = pthread_self();
 
 	/* find core */
-	for (core = 0; core < CONFIG_CORE_COUNT; core++) {
+	for (core = 0; core < CACHE_VCORE_COUNT; core++) {
 		if (host_cache->thread_id[core] == thread_id)
 			return core;
 	}
@@ -336,6 +338,7 @@ static inline void _cache_set_udata(struct cache_elem *elem, int core,
 		uentry->data = address;
 
 	uentry->snapshot = malloc(alloc_size);
+	uentry->snaphost_new = 1;
 
 	/* memcpy and take a snapshot of original data for comparison later */
 	memcpy(uentry->snapshot, uentry->data, size);
@@ -364,6 +367,7 @@ static inline void _cache_new_data(struct cache_elem *elem, int core,
 		centry->data = address;
 
 	centry->snapshot = malloc(alloc_size);
+	centry->snaphost_new = 1;
 
 	/* memcpy and take a snapshot of original data for comparison later */
 	memcpy(centry->snapshot, centry->data, size);
@@ -392,8 +396,8 @@ static inline struct cache_elem *_cache_new_celem(void *addr, int core,
 	_cache_set_udata(elem, core, func, line, type, addr, size, aligned_size, 1, action);
 
 	/* create the cache mappings - we only alloc for new entries */
-	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
-		_cache_new_data(elem, core, func, line, type, addr, size, aligned_size,
+	for (i = 0; i < CACHE_VCORE_COUNT; i++) {
+		_cache_new_data(elem, i, func, line, type, addr, size, aligned_size,
 				i == core ? 0 : 1);
 	}
 	return elem;
@@ -422,8 +426,8 @@ static inline struct cache_elem *_cache_new_uelem(void *addr, int core,
 	_cache_set_udata(elem, core, func, line, type, addr, size, aligned_size, 0, action);
 
 	/* create the cache mappings */
-	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
-		_cache_new_data(elem, core, func, line, type, addr, size, aligned_size, 1);
+	for (i = 0; i < CACHE_VCORE_COUNT; i++) {
+		_cache_new_data(elem, i, func, line, type, addr, size, aligned_size, 1);
 	}
 	return elem;
 }
@@ -438,7 +442,7 @@ static inline void _cache_free_elem(struct cache_elem *elem)
 
 	/* TODO check coherency */
 
-	for (core = 0; core < CONFIG_CORE_COUNT; core++) {
+	for (core = 0; core < CACHE_VCORE_COUNT; core++) {
 		if (elem->cache[core].data) {
 			if (elem->cache[core].data_free)
 				free(elem->cache[core].data);
@@ -468,7 +472,7 @@ static inline void _cache_free_all(void)
 			free(uentry->data);
 		if (uentry->snapshot)
 			free(uentry->snapshot);
-		for (j = 0; j < CONFIG_CORE_COUNT; j++) {
+		for (j = 0; j < CACHE_VCORE_COUNT; j++) {
 			if (elem->cache[j].data_free)
 				free(elem->cache[j].data);
 			if (elem->cache[j].snapshot)
@@ -485,25 +489,30 @@ static inline void _cache_elem_check_inv_snapshot(struct cache_elem *elem, int c
 {
 	struct cache_entry *centry;
 	struct cache_entry *uentry = &elem->uncache;
-	int clobbered = 0, dirty[CONFIG_CORE_COUNT] = {0};
+	int clobbered = 0, dirty[CACHE_VCORE_COUNT] = {0};
 	int j;
 
-	for (j = 0; j < CONFIG_CORE_COUNT; j++) {
+	for (j = 0; j < CACHE_VCORE_COUNT; j++) {
 
 		/* assume core can invalidate itself when dirty */
 		if (core == j)
 			continue;
 
 		centry = &elem->cache[j];
+		if (centry->snaphost_new)
+			continue;
+
 		dirty[j] = memcmp(centry->snapshot, centry->data, elem->size);
-		fprintf(stderr, "error: **** clobbering cache -"
+		fprintf(stderr, "error: **** clobbering cache - "
 				"dirty cache on core %d being invalidated by core %d\n",
 				j, core);
+		_cache_dump_cacheline("snapshot", (char*)centry->snapshot, offset,
+						size, elem->size, centry->data);
 		clobbered = 1;
 	}
 
 	if (uentry->action == CACHE_ACTION_INV && uentry->core != core) {
-		fprintf(stderr, "error: **** clobbering cache -"
+		fprintf(stderr, "error: **** clobbering cache - "
 				"double invalidation with different cores and no writeback\n");
 		clobbered = 1;
 	}
@@ -518,7 +527,7 @@ static inline void _cache_elem_check_inv_snapshot(struct cache_elem *elem, int c
 				core, elem->id);
 		fprintf(stderr, "  this user %s() line %d\n", func, line);
 
-		for (j = 0; j < CONFIG_CORE_COUNT; j++) {
+		for (j = 0; j < CACHE_VCORE_COUNT; j++) {
 
 			if (!dirty[j])
 				continue;
@@ -561,7 +570,6 @@ static inline void _cache_elem_check_wb_snapshot(struct cache_elem *elem, int co
 		clobbered = 1;
 	}
 
-
 	/* compare snapshot to local data, they should match during invalidation
 	 * otherwise we are clobbering local data
 	 */
@@ -593,6 +601,8 @@ static inline void _cache_elem_update_csnapshot(struct cache_elem *elem, int cor
 	centry->symbol_size = backtrace(centry->symbols, _BACTRACE_SIZE);
 	uentry->action = action;
 	uentry->core = core;
+	uentry->snaphost_new = 0;
+	centry->snaphost_new = 0;
 }
 
 static inline void _cache_elem_update_usnapshot(struct cache_elem *elem, int core,
@@ -609,6 +619,7 @@ static inline void _cache_elem_update_usnapshot(struct cache_elem *elem, int cor
 	uentry->symbol_size = backtrace(uentry->symbols, _BACTRACE_SIZE);
 	uentry->action = action;
 	uentry->core = core;
+	uentry->snaphost_new = 0;
 }
 
 /*
@@ -627,9 +638,9 @@ static inline void _cache_elem_invalidate(struct cache_elem *elem, int core,
 	_cache_dump_cacheline("inv uncache src", (char*)elem->uncache.data, offset,
 			inv_size, elem->size, NULL);
 
-	for (i = 0; i < CONFIG_CORE_COUNT; i++) {
+	for (i = 0; i < CACHE_VCORE_COUNT; i++) {
 		centry = &elem->cache[i];
-		fprintf(stdout, "core %d\n", i);
+		//fprintf(stdout, "core %d\n", i);
 
 		_cache_dump_cacheline("inv cache before", (char*)centry->data,  offset,
 				inv_size, elem->size, (char*)elem->uncache.data);
@@ -676,8 +687,8 @@ static inline void _dcache_writeback_region(void *addr, size_t size, const char 
 	struct cache_elem *elem;
 	size_t phy_size = _cache_op_size(size);
 
-	fprintf(stdout, "**dcache wb %zu(%zu) bytes at %s() %d - %s\n", size,
-			phy_size, func, line, file);
+	fprintf(stdout, "**dcache wb core %d %zu(%zu) bytes at %s() %d - %s\n",
+			core, size, phy_size, func, line, file);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
@@ -703,8 +714,8 @@ static inline void _dcache_invalidate_region(void *addr, size_t size, const char
 	struct cache_elem *elem;
 	size_t phy_size = _cache_op_size(size);
 
-	fprintf(stdout, "**dcache inv %zu(%zu) bytes at %s() %d - %s\n", size,
-			phy_size, func, line, file);
+	fprintf(stdout, "**dcache inv core %d %zu(%zu) bytes at %s() %d - %s\n",
+			core, size, phy_size, func, line, file);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
@@ -730,8 +741,8 @@ static inline void _icache_invalidate_region(void *addr, size_t size, const char
 	struct cache_elem *elem;
 	size_t phy_size = _cache_op_size(size);
 
-	fprintf(stdout, "**icache inv %zu(%zu) bytes at %s() %d - %s\n", size,
-			phy_size, func, line, file);
+	fprintf(stdout, "**icache inv core %d %zu(%zu) bytes at %s() %d - %s\n",
+			core, size, phy_size, func, line, file);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
@@ -757,8 +768,8 @@ static inline void _dcache_writeback_invalidate_region(void *addr,
 	struct cache_elem *elem;
 	size_t phy_size = _cache_op_size(size);
 
-	fprintf(stdout, "**dcache wb+inv %zu(%zu) bytes at %s() %d - %s\n", size,
-			phy_size, func, line, file);
+	fprintf(stdout, "**dcache wb+inv core %d %zu(%zu) bytes at %s() %d - %s\n",
+			core, size, phy_size, func, line, file);
 
 	_cache_dump_address_type(addr, size);
 	_cache_dump_backtrace();
