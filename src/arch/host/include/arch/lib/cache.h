@@ -131,16 +131,16 @@ static inline void _cache_dump_cacheline(const char * text, char *base,
 	fprintf(stdout, "data: %s\n", text);
 
 	if (offset > region_size) {
-		fprintf(stderr, "error: offset %zu greater than region %zu\n",
+		fprintf(stdout, "error: offset %zu greater than region %zu\n",
 				offset, region_size);
 		return;
 	}
 
 	if (offset + size > region_size) {
-		fprintf(stderr, "error: offset %zu + size %zu greater than region %zu\n",
+		fprintf(stdout, "error: offset %zu + size %zu greater than region %zu\n",
 				offset, size, region_size);
 		size = region_size - offset;
-		fprintf(stderr, "error: resized to %zu (CHECK CODE AS RESIZE NOT DONE IN HW)\n", size);
+		fprintf(stdout, "error: resized to %zu (CHECK CODE AS RESIZE NOT DONE IN HW)\n", size);
 	}
 
 	rem = size % 16;
@@ -232,7 +232,7 @@ static inline int _cache_find_core(const char *func, int line)
 			return core;
 	}
 
-	fprintf(stderr, "error: cant find core for %lu - DEAD at %s:%d\n",
+	fprintf(stdout, "error: cant find core for %lu - DEAD at %s:%d\n",
 		thread_id, func, line);
 	assert(0);
 	return -1;
@@ -386,7 +386,7 @@ static inline struct cache_elem *_cache_new_celem(void *addr, int core,
 
 	elem = _cache_get_free_elem();
 	if (!elem) {
-		fprintf(stderr, "!!no free elems for ccache!\n");
+		fprintf(stdout, "!!no free elems for ccache!\n");
 		return NULL;
 	}
 #if CACHE_DEBUG_ELEM_ID
@@ -416,7 +416,7 @@ static inline struct cache_elem *_cache_new_uelem(void *addr, int core,
 
 	elem = _cache_get_free_elem();
 	if (!elem) {
-		fprintf(stderr, "!!no free elems for ucache!\n");
+		fprintf(stdout, "!!no free elems for ucache!\n");
 		return NULL;
 	}
 #if CACHE_DEBUG_ELEM_ID
@@ -503,7 +503,10 @@ static inline void _cache_elem_check_inv_snapshot(struct cache_elem *elem, int c
 			continue;
 
 		dirty[j] = memcmp(centry->snapshot, centry->data, elem->size);
-		fprintf(stderr, "error: **** clobbering cache - "
+		if (!dirty[j])
+			continue;
+
+		fprintf(stdout, "error: **** clobbering cache - "
 				"dirty cache on core %d being invalidated by core %d\n",
 				j, core);
 		_cache_dump_cacheline("snapshot", (char*)centry->snapshot, offset,
@@ -512,7 +515,7 @@ static inline void _cache_elem_check_inv_snapshot(struct cache_elem *elem, int c
 	}
 
 	if (uentry->action == CACHE_ACTION_INV && uentry->core != core) {
-		fprintf(stderr, "error: **** clobbering cache - "
+		fprintf(stdout, "error: **** clobbering cache - "
 				"double invalidation with different cores and no writeback\n");
 		clobbered = 1;
 	}
@@ -523,9 +526,9 @@ static inline void _cache_elem_check_inv_snapshot(struct cache_elem *elem, int c
 
 	if (clobbered) {
 
-		fprintf(stderr, "**** error: about to clobber by invalidate core %d elem %d\n",
+		fprintf(stdout, "**** error: about to clobber by invalidate core %d elem %d\n",
 				core, elem->id);
-		fprintf(stderr, "  this user %s() line %d\n", func, line);
+		fprintf(stdout, "  this user %s() line %d\n", func, line);
 
 		for (j = 0; j < CACHE_VCORE_COUNT; j++) {
 
@@ -533,7 +536,7 @@ static inline void _cache_elem_check_inv_snapshot(struct cache_elem *elem, int c
 				continue;
 
 			centry = &elem->cache[j];
-			fprintf(stderr, "  core %d last user %s() line %d\n",
+			fprintf(stdout, "  core %d last user %s() line %d\n",
 				j, centry->func, centry->line);
 			backtrace_symbols_fd(centry->symbols, centry->symbol_size, 1);
 
@@ -561,12 +564,12 @@ static inline void _cache_elem_check_wb_snapshot(struct cache_elem *elem, int co
 	int clobbered = 0;
 
 	if (uentry->action == CACHE_ACTION_WB && uentry->core != core) {
-		fprintf(stderr, "error: **** clobbering cache - two writeback from different cores\n");
+		fprintf(stdout, "error: **** clobbering cache - two writeback from different cores\n");
 		clobbered = 1;
 	}
 
 	if (uentry->action == CACHE_ACTION_INV && uentry->core != core) {
-		fprintf(stderr, "error: **** clobbering cache - writeback without invalidation\n");
+		fprintf(stdout, "error: **** clobbering cache - writeback without invalidation\n");
 		clobbered = 1;
 	}
 
@@ -574,10 +577,10 @@ static inline void _cache_elem_check_wb_snapshot(struct cache_elem *elem, int co
 	 * otherwise we are clobbering local data
 	 */
 	if (clobbered) {
-		fprintf(stderr, "**** error: about to clobber by writeback elem %d\n", elem->id);
-		fprintf(stderr, "  last user %s() line %d\n", uentry->func, uentry->line);
+		fprintf(stdout, "**** error: about to clobber by writeback elem %d\n", elem->id);
+		fprintf(stdout, "  last user %s() line %d\n", uentry->func, uentry->line);
 		backtrace_symbols_fd(uentry->symbols, uentry->symbol_size, 1);
-		fprintf(stderr, "  this user %s() line %d\n", func, line);
+		fprintf(stdout, "  this user %s() line %d\n", func, line);
 
 		_cache_dump_cacheline("snapshot", (char*)uentry->snapshot, offset,
 				size, elem->size, uentry->data);
