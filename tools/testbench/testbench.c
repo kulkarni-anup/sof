@@ -267,7 +267,7 @@ static int parse_input_args(int argc, char **argv, struct testbench_prm *tp)
 struct pipeline_thread_data {
 	struct testbench_prm *tp;
 	int count;			/* copy iteration count */
-	int pipeline_id;
+	int core_id;
 };
 
 static int pipline_load_run(struct pipeline_thread_data *ptd)
@@ -279,7 +279,6 @@ static int pipline_load_run(struct pipeline_thread_data *ptd)
 	struct pipeline *curr_p;
 	struct comp_dev *cd;
 	struct file_comp_data *frcd, *fwcd;
-	char pipeline[DEBUG_MSG_LEN] = {0};
 	clock_t tic, toc;
 	double c_realtime, t_exec;
 	int n_in, n_out, ret;
@@ -291,7 +290,7 @@ static int pipline_load_run(struct pipeline_thread_data *ptd)
 	printf("==========================================================\n");
 
 	/* parse topology file and create pipeline */
-	if (parse_topology(sof_get(),tp, pipeline) < 0) {
+	if (parse_topology(sof_get(),tp, ptd->core_id) < 0) {
 		fprintf(stderr, "error: parsing topology\n");
 		exit(EXIT_FAILURE);
 	}
@@ -382,7 +381,7 @@ static int pipline_load_run(struct pipeline_thread_data *ptd)
 	printf("		           Test Summary %d\n", count);
 	printf("==========================================================\n");
 	printf("Test Pipeline:\n");
-	printf("%s\n", pipeline);
+	printf("%s\n", tp->pipeline_string);
 	printf("Input bit format: %s\n", tp->bits_in);
 	printf("Input sample rate: %d\n", tp->fs_in);
 	printf("Output sample rate: %d\n", tp->fs_out);
@@ -445,6 +444,7 @@ int main(int argc, char **argv)
 	tp.copy_check = false;
 	tp.dynamic_pipeline_iterations = 1;
 	tp.num_vcores = 0;
+	tp.pipeline_string = calloc(1, DEBUG_MSG_LEN);
 
 	/* command line arguments*/
 	err = parse_input_args(argc, argv, &tp);
@@ -492,7 +492,7 @@ int main(int argc, char **argv)
 
 	/* build, run and teardown pipelines */
 	for (i = 0; i < tp.num_vcores; i++) {
-		ptd[i].pipeline_id = i;
+		ptd[i].core_id = i;
 		ptd[i].tp = &tp;
 		ptd[i].count = 0;
 		err = pthread_create(&hc.thread_id[i], NULL,
@@ -515,6 +515,7 @@ out:
 	free(tp.tplg_file);
 	for (i = 0; i < tp.output_file_num; i++)
 		free(tp.output_file[i]);
+	free(tp.pipeline_string);
 
 	_cache_free_all();
 

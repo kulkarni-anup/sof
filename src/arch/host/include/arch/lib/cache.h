@@ -545,7 +545,7 @@ static inline void _cache_elem_check_inv_snapshot(struct cache_elem *elem, int c
 		}
 		_cache_dump_cacheline("uncache", (char*)elem->uncache.data, offset,
 				size, elem->size, NULL);
-		assert(0);
+		//assert(0);
 	}
 }
 
@@ -583,7 +583,7 @@ static inline void _cache_elem_check_wb_snapshot(struct cache_elem *elem, int co
 				size, elem->size, uentry->data);
 		_cache_dump_cacheline("uncache", (char*)uentry->data, offset,
 				size, elem->size, uentry->snapshot);
-		assert(0);
+		//assert(0);
 	}
 }
 

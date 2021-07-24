@@ -1271,7 +1271,7 @@ int load_widget(void *dev, int dev_type, struct comp_info *temp_comp_list,
 
 	/* load pga widget */
 	case(SND_SOC_TPLG_DAPM_PGA):
-		if (load_pga(dev, comp_id, pipeline_id, widget) < 0) {
+		if (load_pga(dev, comp_id, pipeline_id, tp, widget) < 0) {
 			fprintf(stderr, "error: load pga\n");
 			ret = -EINVAL;
 			goto exit;
@@ -1310,7 +1310,7 @@ int load_widget(void *dev, int dev_type, struct comp_info *temp_comp_list,
 		}
 		break;
 	case(SND_SOC_TPLG_DAPM_BUFFER):
-		if (load_buffer(dev, comp_id, pipeline_id, widget) < 0) {
+		if (load_buffer(dev, comp_id, pipeline_id, tp, widget) < 0) {
 			fprintf(stderr, "error: load buffer\n");
 			ret = -EINVAL;
 			goto exit;
@@ -1323,35 +1323,35 @@ int load_widget(void *dev, int dev_type, struct comp_info *temp_comp_list,
 						widget->sname);
 
 		if (load_pipeline(dev, comp_id, pipeline_id, widget,
-				  *sched_id) < 0) {
+				  *sched_id, tp) < 0) {
 			fprintf(stderr, "error: load pipeline\n");
 			ret = -EINVAL;
 			goto exit;
 		}
 		break;
 	case(SND_SOC_TPLG_DAPM_SRC):
-		if (load_src(dev, comp_id, pipeline_id, widget, tp) < 0) {
+		if (load_src(dev, comp_id, pipeline_id, widget, tp, tp) < 0) {
 			fprintf(stderr, "error: load src\n");
 			ret = -EINVAL;
 			goto exit;
 		}
 		break;
 	case(SND_SOC_TPLG_DAPM_ASRC):
-		if (load_asrc(dev, comp_id, pipeline_id, widget, tp) < 0) {
+		if (load_asrc(dev, comp_id, pipeline_id, widget, tp, tp) < 0) {
 			fprintf(stderr, "error: load src\n");
 			ret = -EINVAL;
 			goto exit;
 		}
 		break;
 	case(SND_SOC_TPLG_DAPM_MIXER):
-		if (load_mixer(dev, comp_id, pipeline_id, widget) < 0) {
+		if (load_mixer(dev, comp_id, pipeline_id, widget, tp) < 0) {
 			fprintf(stderr, "error: load mixer\n");
 			ret = -EINVAL;
 			goto exit;
 		}
 		break;
 	case(SND_SOC_TPLG_DAPM_EFFECT):
-		if (load_process(dev, comp_id, pipeline_id, widget) < 0) {
+		if (load_process(dev, comp_id, pipeline_id, widget, tp) < 0) {
 			fprintf(stderr, "error: load effect\n");
 			ret = -EINVAL;
 			goto exit;
@@ -1371,10 +1371,11 @@ int load_widget(void *dev, int dev_type, struct comp_info *temp_comp_list,
 			fprintf(stderr, "error: loading controls\n");
 			goto exit;
 		}
+		ret = 0;
 		break;
 	}
 
-	ret = 0;
+	ret = 1;
 
 exit:
 	/* free allocated widget data */

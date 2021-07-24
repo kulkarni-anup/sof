@@ -18,8 +18,8 @@
 
 #include <sof/lib/uuid.h>
 
-#define DEBUG_MSG_LEN		256
-#define MAX_LIB_NAME_LEN	256
+#define DEBUG_MSG_LEN		1024
+#define MAX_LIB_NAME_LEN	1024
 
 #define MAX_OUTPUT_FILE_NUM	16
 
@@ -50,6 +50,10 @@ struct testbench_prm {
 	bool copy_check;
 	int dynamic_pipeline_iterations;
 	int num_vcores;
+
+	FILE *file;
+	char *pipeline_string;
+	int output_file_index;
 };
 
 struct shared_lib_table {
@@ -92,5 +96,5 @@ int get_index_by_uuid(struct sof_ipc_comp_ext *comp_ext,
 		      struct shared_lib_table *lib_table);
 
 int parse_topology(struct sof *sof,
-		   struct testbench_prm *tp, char *pipeline_msg);
+		   struct testbench_prm *tp, int core_id);
 #endif
